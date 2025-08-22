@@ -6,6 +6,13 @@ import cv2
 import numpy as np
 from xml.etree.ElementTree import Element, SubElement, ElementTree
 
+# New import for full‑colour vectorization
+try:
+    from PIL import Image  # Pillow is used for colour image processing
+except ImportError:
+    # Provide a friendly error if Pillow is not installed
+    Image = None
+
 # Configuration
 UPLOAD_FOLDER = 'uploads'
 VECTOR_FOLDER = 'vectors'
@@ -81,6 +88,67 @@ def vectorize_image_to_svg(img_path: str, svg_path: str, approx_epsilon: float =
     ElementTree(svg).write(svg_path)
 
 
+# -----------------------------------------------------------------------------
+# Colour vectorization
+#
+# To generate a coloured SVG that reproduces every pixel of the original image,
+# we group pixels by colour and draw a 1×1 rectangle for each pixel within a
+# group. Grouping reduces the overhead of repeating the colour on every
+# individual rect and makes the resulting SVG slightly smaller. Transparent
+# pixels are skipped entirely. See medium article for discussion【493823962687885†L90-L117】.
+def vectorize_image_to_colour_svg(img_path: str, svg_path: str) -> None:
+    """
+    Create a coloured SVG representation of a raster image. Each opaque pixel
+    becomes a 1×1 rectangle with its fill colour matching the source pixel.
+
+    Parameters
+    ----------
+    img_path : str
+        The path to the input image file.
+    svg_path : str
+        The path where the output SVG file will be saved.
+    """
+    if Image is None:
+        raise ImportError(
+            "Pillow (the `PIL` package) is required for colour vectorization. "
+            "Please ensure it is installed."
+        )
+    # Open the input image and convert to RGBA to access the alpha channel
+    with Image.open(img_path) as im:
+        rgba = im.convert("RGBA")
+        width, height = rgba.size
+        pixels = rgba.load()
+
+    # Build a mapping of colour (hex string) to a list of pixel coordinates
+    colour_map: dict[str, list[tuple[int, int]]] = {}
+    for y in range(height):
+        for x in range(width):
+            r, g, b, a = pixels[x, y]
+            # Skip fully transparent pixels
+            if a == 0:
+                continue
+            colour = f"#{r:02x}{g:02x}{b:02x}"
+            colour_map.setdefault(colour, []).append((x, y))
+
+    # Create root SVG element
+    svg = Element(
+        "svg",
+        xmlns="http://www.w3.org/2000/svg",
+        width=str(width),
+        height=str(height),
+        viewBox=f"0 0 {width} {height}",
+    )
+
+    # For each colour group, create a <g> element and add rects
+    for colour, coords in colour_map.items():
+        group = SubElement(svg, "g", fill=colour, stroke="none")
+        for x, y in coords:
+            SubElement(group, "rect", x=str(x), y=str(y), width="1", height="1")
+
+    # Write the SVG file
+    ElementTree(svg).write(svg_path)
+
+
 @app.route('/', methods=['GET', 'POST'])
 def index():
     """Render the upload form or process the uploaded image."""
@@ -102,9 +170,10 @@ def index():
             # Generate SVG filename and path
             svg_filename = f"{unique_id}.svg"
             svg_path = os.path.join(app.config['VECTOR_FOLDER'], svg_filename)
-            # Vectorize the image
+            # Vectorize the image. By default we use full‑colour vectorization.
             try:
-                vectorize_image_to_svg(upload_path, svg_path)
+                # Use colour vectorization for richer output
+                vectorize_image_to_colour_svg(upload_path, svg_path)
             except Exception as e:
                 return render_template('index.html', error=f"Error processing image: {e}"), 500
             # Redirect to result page
